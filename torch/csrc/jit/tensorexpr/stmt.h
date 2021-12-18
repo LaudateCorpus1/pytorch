@@ -11,17 +11,16 @@ namespace torch {
 namespace jit {
 namespace tensorexpr {
 
-class Placeholder;
-
 // The common base between all statement node.
-class TORCH_API Stmt : public KernelScopedObject {
+class TORCH_API Stmt : public std::enable_shared_from_this<Stmt> {
  public:
   Stmt() = default;
+  virtual ~Stmt() = default;
   virtual void accept(IRVisitor* visitor) = 0;
   virtual StmtPtr accept_mutator(IRMutator* mutator) = 0;
 
   StmtPtr get_parent() const {
-    return parent_;
+    return parent_ ? parent_->getptr() : nullptr;
   }
 
   /*
@@ -34,12 +33,15 @@ class TORCH_API Stmt : public KernelScopedObject {
   static StmtPtr clone(StmtPtr s);
 
  protected:
-  static void set_parent(StmtPtr s, StmtPtr new_parent) {
+  static void set_parent(StmtPtr s, Stmt* new_parent) {
     s->parent_ = new_parent;
+  }
+  std::shared_ptr<Stmt> getptr() {
+    return shared_from_this();
   }
 
  private:
-  StmtPtr parent_ = nullptr;
+  Stmt* parent_ = nullptr;
 };
 
 template <class Op>
@@ -47,7 +49,7 @@ class StmtNode : public Stmt {
  public:
   using StmtNodeBase = StmtNode<Op>;
   void accept(IRVisitor* visitor) override {
-    visitor->visit(static_to<Op>(this));
+    visitor->visit(static_to<Op>(getptr()));
   }
   StmtPtr accept_mutator(IRMutator* mutator) override;
   StmtNode() = default;
@@ -55,7 +57,7 @@ class StmtNode : public Stmt {
 
 template <class Op>
 StmtPtr StmtNode<Op>::accept_mutator(IRMutator* mutator) {
-  return mutator->mutate(static_to<Op>(this));
+  return mutator->mutate(static_to<Op>(getptr()));
 }
 
 // Concrete Stmt classes
@@ -193,7 +195,7 @@ class TORCH_API Block : public StmtNode<Block> {
   }
 
   void clear() {
-    for (auto* s : stmts_) {
+    for (auto s : stmts_) {
       set_parent(s, nullptr);
     }
     stmts_.clear();
@@ -281,7 +283,7 @@ class TORCH_API Block : public StmtNode<Block> {
 
   // returns the immediate child containing statement s.
   StmtPtr getEnclosedRoot(StmtPtr s) const {
-    while (s && s->get_parent() != this) {
+    while (s && s->get_parent().get() != this) {
       s = s->get_parent();
     }
     return s;
@@ -386,6 +388,42 @@ class TORCH_API Allocate : public StmtNode<Allocate> {
   // TODO: add memory types.
 };
 
+// PlacementAllocate is a variation of the Allocate operator in NNC IR. It does
+// not allocate memory but reuse the memory of another buffer for the given
+// buffer.
+class TORCH_API PlacementAllocate : public StmtNode<PlacementAllocate> {
+ public:
+  static PlacementAllocatePtr make(
+      const BufHandle& buf_handle,
+      const BufHandle& buf_handle_to_reuse) {
+    return alloc<PlacementAllocate>(
+        buf_handle.node(), buf_handle_to_reuse.node());
+  }
+
+  BufPtr buf() const {
+    return buf_;
+  }
+
+  BufPtr buf_to_reuse() const {
+    return buf_to_reuse_;
+  }
+
+  void set_buf(BufPtr buf) {
+    buf_ = buf;
+  }
+
+  void set_buf_to_reuse(BufPtr buf) {
+    buf_to_reuse_ = buf;
+  }
+
+  explicit PlacementAllocate(BufPtr buf, BufPtr buf_to_reuse)
+      : buf_(buf), buf_to_reuse_(buf_to_reuse) {}
+
+ private:
+  BufPtr buf_;
+  BufPtr buf_to_reuse_;
+};
+
 // Free the specific buffer. It is an error.
 class TORCH_API Free : public StmtNode<Free> {
  public:
@@ -417,11 +455,7 @@ class TORCH_API Let : public StmtNode<Let> {
     return alloc<Let>(var.node(), val.node());
   }
 
-  Let(VarPtr var, ExprPtr val) : dtype_(var->dtype()), var_(var), val_(val) {}
-
-  Dtype dtype() const {
-    return dtype_;
-  }
+  Let(VarPtr var, ExprPtr val) : var_(var), val_(val) {}
 
   VarPtr var() const {
     return var_;
@@ -440,7 +474,6 @@ class TORCH_API Let : public StmtNode<Let> {
   }
 
  private:
-  Dtype dtype_;
   VarPtr var_;
   ExprPtr val_;
 };

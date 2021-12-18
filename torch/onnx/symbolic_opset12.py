@@ -12,17 +12,27 @@ import warnings
 
 # This file exports ONNX ops for opset 12
 
+def einsum_helper(g, equation, tensors):
+    if not tensors:
+        raise RuntimeError("Einsum inputs are empty.")
+    # ONNX does not support bool for Einsum inputs.
+    if tensors[0].type().scalarType() == "Bool":
+        tensors = [g.op("Cast", tensor, to_i=sym_help.cast_pytorch_to_onnx["Long"]) for tensor in tensors]
+        return g.op("Cast", g.op("Einsum", *tensors, equation_s=equation), to_i=sym_help.cast_pytorch_to_onnx["Bool"])
+    else:
+        return g.op("Einsum", *tensors, equation_s=equation)
+
 @parse_args("s", "v")
 def einsum(g, equation, tensor_list):
     tensors = sym_help._unpack_list(tensor_list)
-    return g.op("Einsum", *tensors, equation_s=equation)
+    return einsum_helper(g, equation, tensors)
 
 @parse_args("v", "v")
 def outer(g, input, other):
     # make sure to cast other to self's type
     if other.type().scalarType() != input.type().scalarType():
         other = g.op("Cast", other, to_i=sym_help.cast_pytorch_to_onnx[input.type().scalarType()])
-    return g.op("Einsum", input, other, equation_s="i,j->ij")
+    return einsum_helper(g, "i,j->ij", [input, other])
 
 @parse_args("v", "f", "i")
 def dropout(g, input, p, train):
@@ -65,13 +75,17 @@ def nll_loss_nd(g, self, target, weight, reduction, ignore_index):
     return nll_loss(g, self, target, weight, reduction, ignore_index)
 
 
-def cross_entropy_loss(g, self, target, weight, reduction, ignore_index):
+def cross_entropy_loss(g, self, target, weight, reduction, ignore_index, label_smoothing):
     # none reduction : onnx::Constant[value={0}]
     # mean reduction : onnx::Constant[value={1}]
     # sum reduction : onnx::Constant[value={2}]
     reduction = sym_help._maybe_get_const(reduction, "i")
     reduction_vals = ["none", "mean", "sum"]
     reduction = reduction_vals[reduction]
+
+    label_smoothing = sym_help._maybe_get_const(label_smoothing, "f")
+    if label_smoothing > 0.0:
+        raise RuntimeError("Unsupported: ONNX does not support label_smoothing")
 
     # in onnx SoftmaxCrossEntropyLoss specification, ignore_index is optional without default value.
     # therefore we need to set ignore_index attribute even if it is not specified (e.g. ignore_index=-100).
@@ -105,9 +119,9 @@ def binary_cross_entropy_with_logits(g, input, target, weight, pos_weight, reduc
     if reduction == 0:
         return output
     elif reduction == 1:
-        return g.op("ReduceMean", output)
+        return g.op("ReduceMean", output, keepdims_i=0)
     elif reduction == 2:
-        return g.op("ReduceSum", output)
+        return g.op("ReduceSum", output, keepdims_i=0)
     else:
         return sym_help._onnx_unsupported("binary_cross_entropy_with_logits with reduction other than none, mean, or sum")
 

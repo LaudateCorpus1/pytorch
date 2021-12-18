@@ -39,7 +39,7 @@ Operation createStaticSubgraphRuntime(const Node* node) {
   auto g = node->g(attr::Subgraph);
   auto module = std::make_shared<torch::jit::StaticModule>(g);
   auto num_inputs = module->num_inputs();
-  return [module, num_inputs](Stack* stack) {
+  return [module, num_inputs](Stack& stack) {
     RECORD_FUNCTION("Static Runtime", std::vector<c10::IValue>());
     auto inps = torch::jit::last(stack, num_inputs);
     // TODO maybe avoid call to vec
@@ -47,11 +47,11 @@ Operation createStaticSubgraphRuntime(const Node* node) {
     torch::jit::drop(stack, num_inputs);
 
     if (module->num_outputs() > 1) {
-      for (auto& o : outputs.toTuple()->elements()) {
-        push_one(*stack, std::move(o));
+      for (auto& o : outputs.toTupleRef().elements()) {
+        push_one(stack, std::move(o));
       }
     } else {
-      push_one(*stack, std::move(outputs));
+      push_one(stack, std::move(outputs));
     }
     return 0;
   };

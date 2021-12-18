@@ -2,6 +2,7 @@
 
 #include <test/cpp/tensorexpr/test_base.h>
 
+#include <c10/util/irange.h>
 #include <test/cpp/tensorexpr/padded_buffer.h>
 #include <test/cpp/tensorexpr/test_utils.h>
 #include <torch/csrc/jit/tensorexpr/eval.h>
@@ -24,7 +25,6 @@ using namespace torch::jit::tensorexpr;
 using SimpleIRExprEval = ExprEval<SimpleIREvaluator>;
 
 TEST(Expr, BasicValueTest) {
-  KernelScope kernel_scope;
   ExprHandle a = IntImm::make(2), b = IntImm::make(3);
   ExprHandle c = Add::make(a, b);
   SimpleIRExprEval eval(c);
@@ -32,7 +32,6 @@ TEST(Expr, BasicValueTest) {
 }
 
 TEST(Expr, BasicValueTest02) {
-  KernelScope kernel_scope;
   ExprHandle a(2.0f);
   ExprHandle b(3.0f);
   ExprHandle c(4.0f);
@@ -43,7 +42,6 @@ TEST(Expr, BasicValueTest02) {
 }
 
 TEST(Expr, LetTest01) {
-  KernelScope kernel_scope;
   VarHandle x("x", kFloat);
   ExprHandle body = ExprHandle(2.f) + (x * ExprHandle(3.f) + ExprHandle(4.f));
   SimpleIRExprEval eval(body);
@@ -52,7 +50,6 @@ TEST(Expr, LetTest01) {
 }
 
 TEST(Expr, LetTest02) {
-  KernelScope kernel_scope;
   VarHandle x("x", kFloat);
   VarHandle y("y", kFloat);
   ExprHandle body =
@@ -64,9 +61,8 @@ TEST(Expr, LetTest02) {
 }
 
 TEST(Expr, LetStmtTest01) {
-  KernelScope kernel_scope;
-  Placeholder a_buf("a", kFloat, {1});
-  Placeholder b_buf("b", kFloat, {1});
+  BufHandle a_buf("a", {1}, kFloat);
+  BufHandle b_buf("b", {1}, kFloat);
 
   ExprHandle load_a = a_buf.load(0);
   VarHandle var = VarHandle("v", kFloat);
@@ -88,7 +84,6 @@ TEST(Expr, LetStmtTest01) {
 }
 
 TEST(Expr, IntTest) {
-  KernelScope kernel_scope;
   VarHandle x("x", kInt);
   ExprHandle body = ExprHandle(2) + (x * ExprHandle(3) + ExprHandle(4));
   SimpleIRExprEval eval(body);
@@ -97,7 +92,6 @@ TEST(Expr, IntTest) {
 }
 
 TEST(Expr, FloatTest) {
-  KernelScope kernel_scope;
   VarHandle x("x", kFloat);
   ExprHandle body = ExprHandle(2.f) + (x * ExprHandle(3.f) + ExprHandle(4.f));
   SimpleIRExprEval eval(body);
@@ -106,7 +100,6 @@ TEST(Expr, FloatTest) {
 }
 
 TEST(Expr, ByteTest) {
-  KernelScope kernel_scope;
   VarHandle x("x", kByte);
   ExprHandle body = ExprHandle((uint8_t)2) +
       (x * ExprHandle((uint8_t)3) + ExprHandle((uint8_t)4));
@@ -116,7 +109,6 @@ TEST(Expr, ByteTest) {
 }
 
 TEST(Expr, CharTest) {
-  KernelScope kernel_scope;
   VarHandle x("x", kChar);
   ExprHandle body = ExprHandle((int8_t)2) +
       (x * ExprHandle((int8_t)3) + ExprHandle((int8_t)4));
@@ -126,7 +118,6 @@ TEST(Expr, CharTest) {
 }
 
 TEST(Expr, ShortTest) {
-  KernelScope kernel_scope;
   VarHandle x("x", kShort);
   ExprHandle body = ExprHandle((int16_t)2) +
       (x * ExprHandle((int16_t)3) + ExprHandle((int16_t)4));
@@ -136,7 +127,6 @@ TEST(Expr, ShortTest) {
 }
 
 TEST(Expr, LongTest) {
-  KernelScope kernel_scope;
   VarHandle x("x", kLong);
   ExprHandle body = ExprHandle((int64_t)2) +
       (x * ExprHandle((int64_t)3) + ExprHandle((int64_t)4));
@@ -146,7 +136,6 @@ TEST(Expr, LongTest) {
 }
 
 TEST(Expr, HalfTest) {
-  KernelScope kernel_scope;
   VarHandle x("x", kHalf);
   ExprHandle body = ExprHandle((at::Half)2) +
       (x * ExprHandle((at::Half)3) + ExprHandle((at::Half)4));
@@ -156,7 +145,6 @@ TEST(Expr, HalfTest) {
 }
 
 TEST(Expr, DoubleTest) {
-  KernelScope kernel_scope;
   VarHandle x("x", kDouble);
   ExprHandle body = ExprHandle((double)2) +
       (x * ExprHandle((double)3) + ExprHandle((double)4));
@@ -166,18 +154,17 @@ TEST(Expr, DoubleTest) {
 }
 
 TEST(Expr, VectorAdd01) {
-  KernelScope kernel_scope;
   const int kVectorSize = 8;
   const int kVectorCount = 128;
   const int kTotalSize = kVectorSize * kVectorCount;
 
-  Placeholder a_buf(BufHandle("A", {ExprHandle(kTotalSize)}, kFloat));
-  Placeholder b_buf(BufHandle("B", {ExprHandle(kTotalSize)}, kFloat));
-  Placeholder c_buf(BufHandle("C", {ExprHandle(kTotalSize)}, kFloat));
+  BufHandle a_buf("A", {kTotalSize}, kFloat);
+  BufHandle b_buf("B", {kTotalSize}, kFloat);
+  BufHandle c_buf("C", {kTotalSize}, kFloat);
 
   /*
   Build the following:
-    for (int index = 0; index < kVectorCount; index++) {
+    for (const auto index : c10::irange(kVectorCount)) {
       store(c_buf, ramp(index * 8, 1, 8),
             load(a_buf, ramp(index * 8, 1, 8) +
             load(b_buf, ramp(index * 8, 1, 8))))
@@ -201,7 +188,7 @@ TEST(Expr, VectorAdd01) {
   PaddedBuffer<float> b_v(kTotalSize);
   PaddedBuffer<float> c_v(kTotalSize);
   PaddedBuffer<float> c_ref(kTotalSize);
-  for (int i = 0; i < kTotalSize; i++) {
+  for (const auto i : c10::irange(kTotalSize)) {
     a_v(i) = i * i;
     b_v(i) = i * i * 4;
     c_ref(i) = a_v(i) + b_v(i);
@@ -212,11 +199,10 @@ TEST(Expr, VectorAdd01) {
 }
 
 TEST(Expr, CompareSelectEQ) {
-  KernelScope kernel_scope;
   constexpr int N = 1024;
-  Placeholder a(BufHandle("A", {N}, kInt));
-  Placeholder b(BufHandle("B", {N}, kInt));
-  Placeholder c(BufHandle("C", {N}, kInt));
+  BufHandle a("A", {N}, kInt);
+  BufHandle b("B", {N}, kInt);
+  BufHandle c("C", {N}, kInt);
   std::vector<int> a_buffer(N, 1);
   std::vector<int> b_buffer(N, 1);
   std::vector<int> c_buffer(N, 0);
@@ -251,11 +237,10 @@ TEST(Expr, CompareSelectDtypes) {
   // This test constructs a CompareSelect expression where the input dtype is
   // different from the output dtype and verifies that it works correctly:
   //   result = ((int)lhs == (int)rhs) ? (float)retval1 : (float)retval2
-  KernelScope kernel_scope;
   constexpr int N = 1024;
-  Placeholder a(BufHandle("A", {N}, kInt));
-  Placeholder b(BufHandle("B", {N}, kInt));
-  Placeholder c(BufHandle("C", {N}, kFloat));
+  BufHandle a("A", {N}, kInt);
+  BufHandle b("B", {N}, kInt);
+  BufHandle c("C", {N}, kFloat);
   std::vector<int> a_buffer(N, 1);
   std::vector<int> b_buffer(N, 1);
   std::vector<float> c_buffer(N, 0.0f);
@@ -290,10 +275,9 @@ TEST(Expr, CompareSelectDtypes) {
 }
 
 TEST(Expr, IntrinsicsDtypes) {
-  KernelScope kernel_scope;
   constexpr int N = 256;
-  Placeholder a(BufHandle("A", {N}, kDouble));
-  Placeholder b(BufHandle("B", {N}, kDouble));
+  BufHandle a("A", {N}, kDouble);
+  BufHandle b("B", {N}, kDouble);
   std::vector<double> a_buffer(N, -10.0);
   std::vector<double> b_buffer(N, 0.0);
   std::vector<double> b_ref(N, 10.0);
@@ -312,7 +296,6 @@ TEST(Expr, IntrinsicsDtypes) {
 }
 
 TEST(Expr, Substitute01) {
-  KernelScope kernel_scope;
   VarPtr x = alloc<Var>("x", kFloat);
   VarPtr y = alloc<Var>("y", kFloat);
   ExprPtr e =
@@ -334,7 +317,6 @@ TEST(Expr, Substitute01) {
 }
 
 TEST(Expr, Math01) {
-  KernelScope kernel_scope;
   ExprHandle v = sin(ExprHandle(1.0f));
 
   std::ostringstream oss;
@@ -348,7 +330,6 @@ TEST(Expr, Math01) {
 }
 
 TEST(Expr, UnaryMath01) {
-  KernelScope kernel_scope;
   struct TestConfig {
     std::function<ExprHandle(const ExprHandle&)> func;
     std::function<float(float)> ref_func;
@@ -416,7 +397,6 @@ TEST(Expr, UnaryMath01) {
 }
 
 TEST(Expr, BinaryMath01) {
-  KernelScope kernel_scope;
   struct TestConfig {
     std::function<ExprHandle(const ExprHandle&, const ExprHandle&)> func;
     std::function<float(float, float)> ref_func;
@@ -440,7 +420,6 @@ TEST(Expr, BinaryMath01) {
 }
 
 TEST(Expr, LogicalOps01) {
-  KernelScope kernel_scope;
   ExprHandle a(23);
   ExprHandle b(11);
   ExprHandle c(0.72f);
@@ -473,7 +452,6 @@ TEST(Expr, LogicalOps01) {
 }
 
 TEST(Expr, LogicalOps02) {
-  KernelScope kernel_scope;
   ExprHandle a(23);
   ExprHandle b(11);
   ExprHandle c(0.72f);
@@ -492,7 +470,6 @@ TEST(Expr, LogicalOps02) {
 }
 
 TEST(Expr, LogicalOps03) {
-  KernelScope kernel_scope;
   ExprHandle a(23);
   ExprHandle b(11);
   ExprHandle c(0.72f);
@@ -550,7 +527,6 @@ TEST(Expr, LogicalOps03) {
 }
 
 TEST(Expr, BitwiseOps) {
-  KernelScope kernel_scope;
   ExprHandle a(59);
   ExprHandle b(11);
   ExprHandle c(101);
@@ -562,12 +538,11 @@ TEST(Expr, BitwiseOps) {
 }
 
 TEST(Expr, DynamicShapeAdd) {
-  KernelScope kernel_scope;
   auto testWithSize = [](int32_t size) {
     VarHandle n("n", kInt);
-    Placeholder a(BufHandle("a", {n}, kFloat));
-    Placeholder b(BufHandle("b", {n}, kFloat));
-    Placeholder c(BufHandle("c", {n}, kFloat));
+    BufHandle a("a", {n}, kFloat);
+    BufHandle b("b", {n}, kFloat);
+    BufHandle c("c", {n}, kFloat);
     VarHandle i("i", kInt);
     StmtPtr s = For::make(i, 0, n, c.store({i}, a.load(i) + b.load(i)));
     std::vector<float> aData(size, 1.0f);
@@ -581,11 +556,69 @@ TEST(Expr, DynamicShapeAdd) {
   testWithSize(37);
 }
 
+TEST(Expr, OutOfBounds) {
+  ExprHandle N(10);
+  ExprHandle start(0);
+  ExprHandle stop(15);
+  VarHandle i("i", kInt);
+
+  BufHandle X("X", {N}, kInt);
+
+  auto body = Store::make(X, {i}, i);
+  auto stmt = For::make(i, start, stop, body);
+
+  PaddedBuffer<int> data(20);
+
+  EXPECT_ANY_THROW(SimpleIREvaluator(stmt, {X})(data));
+}
+
+TEST(Expr, OutOfBounds2d) {
+  std::vector<std::pair<int, int>> size_options = {{10, 15}, {15, 10}};
+  for (auto sizes : size_options) {
+    ExprHandle N(sizes.first);
+    ExprHandle M(sizes.second);
+    ExprHandle start(0);
+    ExprHandle stopInner(15);
+    ExprHandle stopOuter(15);
+    VarHandle i("i", kInt);
+    VarHandle j("j", kInt);
+
+    BufHandle X("X", {N, M}, kInt);
+
+    auto body = Store::make(X, {i, j}, i);
+    auto inner = For::make(j, start, stopInner, body);
+    auto stmt = For::make(i, start, stopOuter, inner);
+
+    PaddedBuffer<int> data(400);
+
+    EXPECT_ANY_THROW(SimpleIREvaluator(stmt, {X})(data));
+  }
+}
+
+TEST(Expr, OutOfBounds2dFlattenedIndex) {
+  ExprHandle buf_size(149);
+  ExprHandle start(0);
+  ExprHandle stopInner(15);
+  ExprHandle stopOuter(10);
+  VarHandle i("i", kInt);
+  VarHandle j("j", kInt);
+
+  BufHandle X("X", {buf_size}, kInt);
+
+  auto idx = Add::make(Mul::make(i, stopInner), j);
+  auto body = Store::make(X, {idx}, i);
+  auto inner = For::make(j, start, stopInner, body);
+  auto stmt = For::make(i, start, stopOuter, inner);
+
+  PaddedBuffer<int> data(400);
+
+  EXPECT_ANY_THROW(SimpleIREvaluator(stmt, {X})(data));
+}
+
 void testCond01() {
-  KernelScope kernel_scope;
   const int N = 16;
   PaddedBuffer<float> a_v(N);
-  Placeholder a_buf("a", kFloat, {N});
+  BufHandle a_buf("a", {N}, kFloat);
   VarHandle index = VarHandle("index", kInt);
   StmtPtr assign_x2 = a_buf.store({index}, cast<float>(index) * 2);
   StmtPtr assign_x3 = a_buf.store({index}, cast<float>(index) * 3);
@@ -595,7 +628,7 @@ void testCond01() {
   SimpleIREvaluator(for_stmt, {a_buf})(a_v);
 
   PaddedBuffer<float> a_ref(N);
-  for (int i = 0; i < N; i++) {
+  for (const auto i : c10::irange(N)) {
     if (i % 2 == 0) {
       a_ref(i) = i * 2;
     } else {
@@ -606,7 +639,6 @@ void testCond01() {
 }
 
 void testIfThenElse01() {
-  KernelScope kernel_scope;
   ExprHandle v = ifThenElse(ExprHandle(1), ExprHandle(1.0f), ExprHandle(2.0f));
 
   std::ostringstream oss;
@@ -618,7 +650,6 @@ void testIfThenElse01() {
 }
 
 void testIfThenElse02() {
-  KernelScope kernel_scope;
   ExprHandle v = ifThenElse(ExprHandle(0), ExprHandle(1.0f), ExprHandle(2.0f));
 
   std::ostringstream oss;
@@ -630,7 +661,6 @@ void testIfThenElse02() {
 }
 
 void testIfThenElse03() {
-  KernelScope kernel_scope;
   ExprHandle v =
       ifThenElse(BoolImm::make(false), ExprHandle(1.0f), ExprHandle(2.0f));
 
@@ -643,10 +673,9 @@ void testIfThenElse03() {
 }
 
 void testStmtClone() {
-  KernelScope kernel_scope;
   const int N = 16;
 
-  Placeholder a_buf("a", kInt, {N});
+  BufHandle a_buf("a", {N}, kInt);
   VarHandle index = VarHandle("index", kInt);
   StmtPtr body = a_buf.store({index}, 5);
   StmtPtr loop = For::make(index, 0, N, body);

@@ -1,7 +1,7 @@
 import random
 
 from torch.utils.data import IterDataPipe, Sampler, SequentialSampler, functional_datapipe
-from typing import TypeVar, Type, Iterator, Sized, Optional, Tuple, Dict, List
+from typing import Dict, Iterator, List, Optional, Sized, Tuple, Type, TypeVar
 
 T_co = TypeVar('T_co', covariant=True)
 
@@ -10,10 +10,11 @@ class SamplerIterDataPipe(IterDataPipe[T_co]):
     r""" :class:`SamplerIterDataPipe`.
 
     Iterable DataPipe to generate sample elements.
-    args:
-        datapipe: IterDataPipe sampled from
+
+    Args:
+        datapipe: IterDataPipe to sample from
         sampler: Sampler class to genereate sample elements from input DataPipe.
-                    Default is :class:`SequentialSampler` for IterDataPipe
+            Default is :class:`SequentialSampler` for IterDataPipe
     """
     datapipe: IterDataPipe
     sampler: Sampler
@@ -44,8 +45,8 @@ class SamplerIterDataPipe(IterDataPipe[T_co]):
 
 
 @functional_datapipe('shuffle')
-class ShuffleIterDataPipe(IterDataPipe[T_co]):
-    r""" :class:`ShuffleIterDataPipe`
+class ShufflerIterDataPipe(IterDataPipe[T_co]):
+    r""" :class:`ShufflerIterDataPipe`
 
     Iterable DataPipe to shuffle the input DataPipe with a buffer. The buffer
     with `buffer_size` is filled with elements from the datapipe first. Then,
@@ -63,7 +64,7 @@ class ShuffleIterDataPipe(IterDataPipe[T_co]):
     mode (:attr:`num_worker > 0`), `worker_init_fn` is used to set up a random seed
     for each worker process.
 
-    args:
+    Args:
         datapipe: The IterDataPipe being shuffled
         buffer_size: The buffer size for shuffling (default to 10000)
         unbatch_level: Specifies if it necessary to unbatch source data before
@@ -71,11 +72,12 @@ class ShuffleIterDataPipe(IterDataPipe[T_co]):
     """
     datapipe: IterDataPipe[T_co]
     buffer_size: int
-    _buffer: List[T_co]
+    _shuffle_enabled: bool
 
     def __init__(self,
                  datapipe: IterDataPipe[T_co],
                  *,
+                 default: bool = True,
                  buffer_size: int = 10000,
                  unbatch_level: int = 0
                  ) -> None:
@@ -86,24 +88,32 @@ class ShuffleIterDataPipe(IterDataPipe[T_co]):
         else:
             self.datapipe = datapipe.unbatch(unbatch_level=unbatch_level)
         self.buffer_size = buffer_size
-        self._buffer = []
+        self._shuffle_enabled = default
 
-    def buffer_replace(self, x):
-        idx = random.randint(0, self.buffer_size - 1)
-        val = self._buffer[idx]
-        self._buffer[idx] = x
+    @staticmethod
+    def buffer_replace(buffer, x):
+        idx = random.randint(0, len(buffer) - 1)
+        val = buffer[idx]
+        buffer[idx] = x
         return val
 
+    def set_shuffle_settings(self, shuffle=True):
+        self._shuffle_enabled = shuffle
+
     def __iter__(self) -> Iterator[T_co]:
-        # TODO: Buffer is global, should be per __iter__ !!!
-        for x in self.datapipe:
-            if len(self._buffer) == self.buffer_size:
-                yield self.buffer_replace(x)
-            else:
-                self._buffer.append(x)
-        random.shuffle(self._buffer)
-        while self._buffer:
-            yield self._buffer.pop()
+        if not self._shuffle_enabled:
+            for x in self.datapipe:
+                yield x
+        else:
+            buffer: List[T_co] = []
+            for x in self.datapipe:
+                if len(buffer) == self.buffer_size:
+                    yield ShufflerIterDataPipe.buffer_replace(buffer, x)
+                else:
+                    buffer.append(x)
+            random.shuffle(buffer)
+            while buffer:
+                yield buffer.pop()
 
     def __len__(self) -> int:
         if isinstance(self.datapipe, Sized):

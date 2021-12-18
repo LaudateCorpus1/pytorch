@@ -20,7 +20,6 @@ from torch._jit_internal import (
 )
 from torch.jit._script import (
     script,
-    _script_pdt,
     Attribute,
     ScriptModule,
     script_method,
@@ -51,6 +50,7 @@ from torch.jit._async import fork, wait
 from torch.jit._serialization import save, load
 from torch.jit._fuser import optimized_execution, fuser, last_executed_optimized_graph
 from torch.jit._freeze import freeze, optimize_for_inference, run_frozen_optimizations
+
 
 # For backwards compatibility
 _fork = fork

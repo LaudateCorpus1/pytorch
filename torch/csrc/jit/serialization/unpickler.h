@@ -3,7 +3,7 @@
 #include <ATen/core/ivalue.h>
 #include <c10/util/ArrayRef.h>
 #include <caffe2/serialize/inline_container.h>
-#include <torch/csrc/WindowsTorchApiMacro.h>
+#include <torch/csrc/Export.h>
 #include <torch/csrc/jit/serialization/pickler.h>
 
 namespace torch {
@@ -108,6 +108,7 @@ class TORCH_API Unpickler {
       const std::string& module_name,
       const std::string& class_name);
   void rebuildTensor(bool quantized);
+  void rebuildSparseTensor();
 #ifdef USE_DISTRIBUTED
   void rebuildRRef();
 #endif

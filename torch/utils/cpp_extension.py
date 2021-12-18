@@ -23,6 +23,8 @@ from setuptools.command.build_ext import build_ext
 from pkg_resources import packaging  # type: ignore[attr-defined]
 
 IS_WINDOWS = sys.platform == 'win32'
+IS_MACOS = sys.platform.startswith('darwin')
+IS_LINUX = sys.platform.startswith('linux')
 LIB_EXT = '.pyd' if IS_WINDOWS else '.so'
 EXEC_EXT = '.exe' if IS_WINDOWS else ''
 CLIB_PREFIX = '' if IS_WINDOWS else 'lib'
@@ -36,6 +38,8 @@ TORCH_LIB_PATH = os.path.join(_TORCH_PATH, 'lib')
 
 BUILD_SPLIT_CUDA = os.getenv('BUILD_SPLIT_CUDA') or (os.path.exists(os.path.join(
     TORCH_LIB_PATH, f'{CLIB_PREFIX}torch_cuda_cu{CLIB_EXT}')) and os.path.exists(os.path.join(TORCH_LIB_PATH, f'{CLIB_PREFIX}torch_cuda_cpp{CLIB_EXT}')))
+
+SUBPROCESS_DECODE_ARGS = ('oem',) if IS_WINDOWS else ()
 
 # Taken directly from python stdlib < 3.9
 # See https://github.com/pytorch/pytorch/issues/48617
@@ -60,7 +64,7 @@ def _find_cuda_home() -> Optional[str]:
             which = 'where' if IS_WINDOWS else 'which'
             with open(os.devnull, 'w') as devnull:
                 nvcc = subprocess.check_output([which, 'nvcc'],
-                                               stderr=devnull).decode().rstrip('\r\n')
+                                               stderr=devnull).decode(*SUBPROCESS_DECODE_ARGS).rstrip('\r\n')
                 cuda_home = os.path.dirname(os.path.dirname(nvcc))
         except Exception:
             # Guess #3
@@ -90,7 +94,7 @@ def _find_rocm_home() -> Optional[str]:
                 ["which hipcc | xargs readlink -f"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
             hipcc, _ = pipe_hipcc.communicate()
             # this will be either <ROCM_HOME>/hip/bin/hipcc or <ROCM_HOME>/bin/hipcc
-            rocm_home = os.path.dirname(os.path.dirname(hipcc.decode().rstrip('\r\n')))
+            rocm_home = os.path.dirname(os.path.dirname(hipcc.decode(*SUBPROCESS_DECODE_ARGS).rstrip('\r\n')))
             if os.path.basename(rocm_home) == 'hip':
                 rocm_home = os.path.dirname(rocm_home)
         except Exception:
@@ -196,6 +200,7 @@ COMMON_NVCC_FLAGS = [
 COMMON_HIP_FLAGS = [
     '-fPIC',
     '-D__HIP_PLATFORM_HCC__=1',
+    '-DUSE_ROCM=1',
 ]
 
 COMMON_HIPCC_FLAGS = [
@@ -218,7 +223,7 @@ def _is_binary_build() -> bool:
 
 def _accepted_compilers_for_platform() -> List[str]:
     # gnu-c++ and gnu-cc are the conda gcc compilers
-    return ['clang++', 'clang'] if sys.platform.startswith('darwin') else ['g++', 'gcc', 'gnu-c++', 'gnu-cc']
+    return ['clang++', 'clang'] if IS_MACOS else ['g++', 'gcc', 'gnu-c++', 'gnu-cc']
 
 
 def get_default_build_root() -> str:
@@ -251,21 +256,24 @@ def check_compiler_ok_for_platform(compiler: str) -> bool:
         return True
     which = subprocess.check_output(['which', compiler], stderr=subprocess.STDOUT)
     # Use os.path.realpath to resolve any symlinks, in particular from 'c++' to e.g. 'g++'.
-    compiler_path = os.path.realpath(which.decode().strip())
+    compiler_path = os.path.realpath(which.decode(*SUBPROCESS_DECODE_ARGS).strip())
     # Check the compiler name
     if any(name in compiler_path for name in _accepted_compilers_for_platform()):
         return True
-    # If ccache is used the compiler path is /usr/bin/ccache. Check by -v flag.
-    version_string = subprocess.check_output([compiler, '-v'], stderr=subprocess.STDOUT).decode()
-    if sys.platform.startswith('linux'):
-        # Check for 'gcc' or 'g++'
+    # If compiler wrapper is used try to infer the actual compiler by invoking it with -v flag
+    version_string = subprocess.check_output([compiler, '-v'], stderr=subprocess.STDOUT).decode(*SUBPROCESS_DECODE_ARGS)
+    if IS_LINUX:
+        # Check for 'gcc' or 'g++' for sccache warpper
         pattern = re.compile("^COLLECT_GCC=(.*)$", re.MULTILINE)
         results = re.findall(pattern, version_string)
         if len(results) != 1:
             return False
         compiler_path = os.path.realpath(results[0].strip())
+        # On RHEL/CentOS c++ is a gcc compiler wrapper
+        if os.path.basename(compiler_path) == 'c++' and 'gcc version' in version_string:
+            return True
         return any(name in compiler_path for name in _accepted_compilers_for_platform())
-    if sys.platform.startswith('darwin'):
+    if IS_MACOS:
         # Check for 'clang' or 'clang++'
         return version_string.startswith("Apple clang")
     return False
@@ -296,19 +304,19 @@ def check_compiler_abi_compatibility(compiler) -> bool:
             platform=sys.platform))
         return False
 
-    if sys.platform.startswith('darwin'):
+    if IS_MACOS:
         # There is no particular minimum version we need for clang, so we're good here.
         return True
     try:
-        if sys.platform.startswith('linux'):
+        if IS_LINUX:
             minimum_required_version = MINIMUM_GCC_VERSION
             versionstr = subprocess.check_output([compiler, '-dumpfullversion', '-dumpversion'])
-            version = versionstr.decode().strip().split('.')
+            version = versionstr.decode(*SUBPROCESS_DECODE_ARGS).strip().split('.')
         else:
             minimum_required_version = MINIMUM_MSVC_VERSION
             compiler_info = subprocess.check_output(compiler, stderr=subprocess.STDOUT)
-            match = re.search(r'(\d+)\.(\d+)\.(\d+)', compiler_info.decode().strip())
-            version = (0, 0, 0) if match is None else match.groups()
+            match = re.search(r'(\d+)\.(\d+)\.(\d+)', compiler_info.decode(*SUBPROCESS_DECODE_ARGS).strip())
+            version = ['0', '0', '0'] if match is None else list(match.groups())
     except Exception:
         _, error, _ = sys.exc_info()
         warnings.warn(f'Error checking compiler version for {compiler}: {error}')
@@ -767,7 +775,7 @@ class BuildExtension(build_ext, object):
     def _check_cuda_version(self):
         if CUDA_HOME:
             nvcc = os.path.join(CUDA_HOME, 'bin', 'nvcc')
-            cuda_version_str = subprocess.check_output([nvcc, '--version']).strip().decode()
+            cuda_version_str = subprocess.check_output([nvcc, '--version']).strip().decode(*SUBPROCESS_DECODE_ARGS)
             cuda_version = re.search(r'release (\d+[.]\d+)', cuda_version_str)
             if cuda_version is not None:
                 cuda_str_version = cuda_version.group(1)
@@ -1483,8 +1491,8 @@ def _prepare_ldflags(extra_ldflags, with_cuda, verbose, is_standalone):
         extra_ldflags.append('torch_cpu.lib')
         if BUILD_SPLIT_CUDA and with_cuda:
             extra_ldflags.append('torch_cuda_cu.lib')
-            # /INCLUDE is used to ensure torch_cuda_cu is linked against in a project that relies on it.
-            extra_ldflags.append('-INCLUDE:?searchsorted_cuda@native@at@@YA?AVTensor@2@AEBV32@0_N1@Z')
+            # See [Note about _torch_cuda_cu_linker_symbol_op and torch_cuda_cu] in native_functions.yaml
+            extra_ldflags.append('-INCLUDE:?_torch_cuda_cu_linker_symbol_op_cuda@native@at@@YA?AVTensor@2@AEBV32@@Z')
             extra_ldflags.append('torch_cuda_cpp.lib')
             # /INCLUDE is used to ensure torch_cuda_cpp is linked against in a project that relies on it.
             # Related issue: https://github.com/pytorch/pytorch/issues/31611
@@ -1631,11 +1639,14 @@ def _get_rocm_arch_flags(cflags: Optional[List[str]] = None) -> List[str]:
         for flag in cflags:
             if 'amdgpu-target' in flag:
                 return ['-fno-gpu-rdc']
-    # Use same defaults from file cmake/public/LoadHIP.cmake.
-    # Must keep in sync if defaults change.
+    # Use same defaults as used for building PyTorch
     # Allow env var to override, just like during initial cmake build.
-    archs = os.environ.get('PYTORCH_ROCM_ARCH', 'gfx803;gfx900;gfx906;gfx908')
-    flags = ['--amdgpu-target=%s' % arch for arch in archs.split(';')]
+    _archs = os.environ.get('PYTORCH_ROCM_ARCH', None)
+    if not _archs:
+        archs = torch.cuda.get_arch_list()
+    else:
+        archs = _archs.replace(' ', ';').split(';')
+    flags = ['--amdgpu-target=%s' % arch for arch in archs]
     flags += ['-fno-gpu-rdc']
     return flags
 
@@ -1727,7 +1738,7 @@ def _run_ninja_build(build_directory: str, verbose: bool, error_prefix: str) -> 
         # `error` is a CalledProcessError (which has an `ouput`) attribute, but
         # mypy thinks it's Optional[BaseException] and doesn't narrow
         if hasattr(error, 'output') and error.output:  # type: ignore[union-attr]
-            message += f": {error.output.decode()}"  # type: ignore[union-attr]
+            message += f": {error.output.decode(*SUBPROCESS_DECODE_ARGS)}"  # type: ignore[union-attr]
         raise RuntimeError(message) from e
 
 
@@ -1862,7 +1873,7 @@ def _write_ninja_file_to_build_library(path,
     ldflags = ([] if is_standalone else [SHARED_FLAG]) + extra_ldflags
 
     # The darwin linker needs explicit consent to ignore unresolved symbols.
-    if sys.platform.startswith('darwin'):
+    if IS_MACOS:
         ldflags.append('-undefined dynamic_lookup')
     elif IS_WINDOWS:
         ldflags = _nt_quote_args(ldflags)
@@ -1996,7 +2007,7 @@ def _write_ninja_file(path,
         link_rule = ['rule link']
         if IS_WINDOWS:
             cl_paths = subprocess.check_output(['where',
-                                                'cl']).decode().split('\r\n')
+                                                'cl']).decode(*SUBPROCESS_DECODE_ARGS).split('\r\n')
             if len(cl_paths) >= 1:
                 cl_path = os.path.dirname(cl_paths[0]).replace(':', '$:')
             else:
