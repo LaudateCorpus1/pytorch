@@ -1310,7 +1310,25 @@ def dropout2d(input: Tensor, p: float = 0.5, training: bool = True, inplace: boo
         return handle_torch_function(dropout2d, (input,), input, p=p, training=training, inplace=inplace)
     if p < 0.0 or p > 1.0:
         raise ValueError("dropout probability has to be between 0 and 1, " "but got {}".format(p))
-    return _VF.feature_dropout_(input, p, training) if inplace else _VF.feature_dropout(input, p, training)
+    inp_dim = input.dim()
+    if inp_dim not in (3, 4):
+        warn_msg = (f"dropout2d: Received a {inp_dim}-D input to dropout2d, which is deprecated "
+                    "and will result in an error in a future release. To retain the behavior "
+                    "and silence this warning, please use dropout instead. Note that dropout2d "
+                    "exists to provide channel-wise dropout on inputs with 2 spatial dimensions, "
+                    "a channel dimension, and an optional batch dimension (i.e. 3D or 4D inputs).")
+        warnings.warn(warn_msg)
+
+    is_batched = inp_dim == 4
+    if not is_batched:
+        input = input.unsqueeze_(0) if inplace else input.unsqueeze(0)
+
+    result = _VF.feature_dropout_(input, p, training) if inplace else _VF.feature_dropout(input, p, training)
+
+    if not is_batched:
+        result = result.squeeze_(0) if inplace else result.squeeze(0)
+
+    return result
 
 
 def dropout3d(input: Tensor, p: float = 0.5, training: bool = True, inplace: bool = False) -> Tensor:
@@ -1328,13 +1346,28 @@ def dropout3d(input: Tensor, p: float = 0.5, training: bool = True, inplace: boo
         training: apply dropout if is ``True``. Default: ``True``
         inplace: If set to ``True``, will do this operation in-place. Default: ``False``
     """
-    # This is 100% the same code as dropout2d. We duplicate this code so that
-    # stack traces are not confusing.
     if has_torch_function_unary(input):
         return handle_torch_function(dropout3d, (input,), input, p=p, training=training, inplace=inplace)
     if p < 0.0 or p > 1.0:
         raise ValueError("dropout probability has to be between 0 and 1, " "but got {}".format(p))
-    return _VF.feature_dropout_(input, p, training) if inplace else _VF.feature_dropout(input, p, training)
+    inp_dim = input.dim()
+    if inp_dim not in (4, 5):
+        warn_msg = (f"dropout3d: Received a {inp_dim}-D input to dropout3d, which is deprecated "
+                    "and will result in an error in a future release. To retain the behavior "
+                    "and silence this warning, please use dropout instead. Note that dropout3d "
+                    "exists to provide channel-wise dropout on inputs with 3 spatial dimensions, "
+                    "a channel dimension, and an optional batch dimension (i.e. 4D or 5D inputs).")
+        warnings.warn(warn_msg)
+
+    is_batched = inp_dim == 5
+    if not is_batched:
+        input = input.unsqueeze_(0) if inplace else input.unsqueeze(0)
+
+    result = _VF.feature_dropout_(input, p, training) if inplace else _VF.feature_dropout(input, p, training)
+
+    if not is_batched:
+        result = result.squeeze_(0) if inplace else result.squeeze(0)
+    return result
 
 
 def feature_alpha_dropout(input: Tensor, p: float = 0.5, training: bool = False, inplace: bool = False) -> Tensor:
@@ -1648,20 +1681,21 @@ See :class:`~torch.nn.LogSigmoid` for more details.
 """,
 )
 
-
 gelu = _add_docstr(
     torch._C._nn.gelu,
     r"""
-gelu(input) -> Tensor
+gelu(input, approximate = 'none') -> Tensor
 
-Applies element-wise the function
+When the approximate argument is 'none', it applies element-wise the function
 :math:`\text{GELU}(x) = x * \Phi(x)`
 
 where :math:`\Phi(x)` is the Cumulative Distribution Function for Gaussian Distribution.
 
+When the approximate argument is 'tanh', Gelu is estimated with:
+    :math::  \text{GELU}(x) = 0.5 * x * (1 + \text{Tanh}(\sqrt(2 / \pi) * (x + 0.044715 * x^3)))
+
 See `Gaussian Error Linear Units (GELUs) <https://arxiv.org/abs/1606.08415>`_.
 """)
-
 
 hardshrink = _add_docstr(
     torch.hardshrink,
