@@ -1,19 +1,54 @@
 import os
 import fnmatch
 import warnings
+import inspect
 
 from io import IOBase
-from typing import Iterable, List, Tuple, Union, Optional
+from typing import Dict, Iterable, List, Tuple, Union, Optional, Callable
 
 from torch.utils.data._utils.serialization import DILL_AVAILABLE
 
 __all__ = [
+    "validate_input_col",
     "StreamWrapper",
     "get_file_binaries_from_pathnames",
     "get_file_pathnames_from_root",
     "match_masks",
     "validate_pathname_binary_tuple",
 ]
+
+
+def validate_input_col(fn: Callable, input_col: Optional[Union[int, tuple, list]]):
+    """
+    Checks that function used in a map style datapipe works with the input column
+
+    Args:
+        fn: The function to check.
+        input_col: The input column to check.
+    Returns:
+        None.
+    Raises:
+        TypeError: If the function is not compatible with the input column.
+    """
+    sig = inspect.signature(fn)
+    if isinstance(input_col, (list, tuple)):
+        sz = len(input_col)
+    else:
+        sz = 1
+
+    if len(sig.parameters) > sz:
+        non_default_params = [p for p in sig.parameters.values() if p.default is p.empty]
+        if len(non_default_params) > sz:
+            raise ValueError(
+                f"The function {fn.__name__} takes {len(non_default_params)} "
+                f"non-default parameters, but {sz} are required for the given `input_col`."
+            )
+
+    if len(sig.parameters) < sz:
+        raise ValueError(
+            f"The function {fn.__name__} takes {len(sig.parameters)} "
+            f"parameters, but {sz} are required for the given `input_col`."
+        )
 
 
 def _check_lambda_fn(fn):
@@ -104,6 +139,25 @@ def validate_pathname_binary_tuple(data: Tuple[str, IOBase]):
         )
 
 
+# Deprecated function names and its corresponding DataPipe type and kwargs for the `_deprecation_warning` function
+_iter_deprecated_functional_names: Dict[str, Dict] = {"open_file_by_fsspec":
+                                                      {"old_class_name": "FSSpecFileOpener",
+                                                       "deprecation_version": "0.4.0",
+                                                       "removal_version": "0.6.0",
+                                                       "old_functional_name": "open_file_by_fsspec",
+                                                       "new_functional_name": "open_files_by_fsspec",
+                                                       "deprecate_functional_name_only": True},
+                                                      "open_file_by_iopath":
+                                                      {"old_class_name": "IoPathFileOpener",
+                                                       "deprecation_version": "0.4.0",
+                                                       "removal_version": "0.6.0",
+                                                       "old_functional_name": "open_file_by_iopath",
+                                                       "new_functional_name": "open_files_by_iopath",
+                                                       "deprecate_functional_name_only": True}}
+
+_map_deprecated_functional_names: Dict[str, Dict] = {}
+
+
 def _deprecation_warning(
     old_class_name: str,
     *,
@@ -114,6 +168,7 @@ def _deprecation_warning(
     new_class_name: str = "",
     new_functional_name: str = "",
     new_argument_name: str = "",
+    deprecate_functional_name_only: bool = False,
 ) -> None:
     if new_functional_name and not old_functional_name:
         raise ValueError("Old functional API needs to be specified for the deprecation warning.")
@@ -124,7 +179,9 @@ def _deprecation_warning(
         raise ValueError("Deprecating warning for functional API and argument should be separated.")
 
     msg = f"`{old_class_name}()`"
-    if old_functional_name:
+    if deprecate_functional_name_only and old_functional_name:
+        msg = f"{msg}'s functional API `.{old_functional_name}()` is"
+    elif old_functional_name:
         msg = f"{msg} and its functional API `.{old_functional_name}()` are"
     elif old_argument_name:
         msg = f"The argument `{old_argument_name}` of {msg} is"

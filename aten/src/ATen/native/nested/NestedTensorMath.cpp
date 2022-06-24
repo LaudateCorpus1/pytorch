@@ -106,8 +106,62 @@ inline const at::Tensor& get_buffer(const at::Tensor& tensor) {
   return get_nested_tensor_impl(tensor)->get_buffer();
 }
 
-inline const at::Tensor& get_nested_size_tensor(const at::Tensor& tensor) {
-  return get_nested_tensor_impl(tensor)->get_nested_size_tensor();
+// The starting positions of the underlying tensors in contiguous buffer memory
+// i.e. the buffer memory offsets to get the underlying tensors
+inline std::vector<int64_t> NestedTensor_get_offsets(const NestedTensorImpl* self_ptr) {
+  int64_t ntensors = self_ptr->size(0);
+  if (ntensors == 0) {
+    return std::vector<int64_t>(1, 0);
+  }
+  std::vector<int64_t> offsets(ntensors + 1);
+  const Tensor& sizemat = self_ptr->get_nested_size_tensor();
+  int64_t orig_dim = sizemat.size(1);
+  // nesting scalars has easy offsets
+  if (orig_dim == 0) {
+    std::iota(offsets.begin(), offsets.end(), 0);
+    return offsets;
+  }
+  const int64_t* sizemat_ptr = sizemat.data_ptr<int64_t>();
+  const Tensor& stridemat = self_ptr->get_nested_stride_tensor();
+  const int64_t* stridemat_ptr = stridemat.data_ptr<int64_t>();
+  offsets[0] = 0;
+  for (int64_t i = 0; i < ntensors; i++) {
+    offsets[i + 1] = offsets[i] + *sizemat_ptr * *stridemat_ptr;
+    sizemat_ptr += orig_dim;
+    stridemat_ptr += orig_dim;
+  }
+  return offsets;
+}
+
+inline std::vector<int64_t> NestedTensor_get_offsets(const at::Tensor& self) {
+  const NestedTensorImpl* self_ptr = get_nested_tensor_impl(self);
+  return NestedTensor_get_offsets(self_ptr);
+}
+
+// The shapes of the underlying tensors
+inline std::vector<IntArrayRef> NestedTensor_get_shapes(const NestedTensorImpl* self_ptr) {
+  int64_t ntensors = self_ptr->size(0);
+  std::vector<IntArrayRef> shapes(ntensors);
+  if (ntensors == 0) {
+    return shapes;
+  }
+  const Tensor& sizemat = self_ptr->get_nested_size_tensor();
+  int64_t orig_dim = sizemat.size(1);
+  // nesting scalars has empty shapes
+  if (orig_dim == 0) {
+    return shapes;
+  }
+  const int64_t* sizemat_ptr = sizemat.data_ptr<int64_t>();
+  for (int64_t i = 0; i < ntensors; i++) {
+    shapes[i] = IntArrayRef(sizemat_ptr, sizemat_ptr + orig_dim);
+    sizemat_ptr += orig_dim;
+  }
+  return shapes;
+}
+
+inline std::vector<IntArrayRef> NestedTensor_get_shapes(const at::Tensor& self) {
+  const NestedTensorImpl* self_ptr = get_nested_tensor_impl(self);
+  return NestedTensor_get_shapes(self_ptr);
 }
 
 // CPU only!
@@ -122,22 +176,17 @@ std::vector<at::Tensor> NestedTensor_unbind(
       "got dimension ",
       dim,
       " instead.");
-  auto esizes = get_nested_size_tensor(self);
-  std::vector<at::Tensor> result_tensors;
-  if (esizes.dim() == 0) {
+  auto self_ptr = get_nested_tensor_impl(self);
+  int64_t ntensors = self_ptr->size(0);
+  std::vector<at::Tensor> result_tensors(ntensors);
+  if (ntensors == 0) {
     return result_tensors;
   }
-  auto esizes_chunks = esizes.unbind(0);
-  std::vector<int64_t> splits;
-  for (const auto i : c10::irange(esizes_chunks.size())) {
-    splits.push_back(esizes_chunks[i].prod().item<int64_t>());
-  }
-  auto buffer_chunks = at::split_with_sizes(get_buffer(self), splits);
-  for (const auto i : c10::irange(buffer_chunks.size())) {
-    const auto& esize_chunk = esizes_chunks[i];
-    result_tensors.push_back(buffer_chunks[i].view(IntArrayRef(
-        esize_chunk.data_ptr<int64_t>(),
-        esize_chunk.data_ptr<int64_t>() + esize_chunk.numel())));
+  const at::Tensor & buffer = self_ptr->get_buffer();
+  std::vector<int64_t> offsets = NestedTensor_get_offsets(self_ptr);
+  std::vector<IntArrayRef> shapes = NestedTensor_get_shapes(self_ptr);
+  for (int64_t i = 0; i < ntensors; i++) {
+    result_tensors[i] = buffer.slice(0, offsets[i], offsets[i + 1]).view(shapes[i]);
   }
   return result_tensors;
 }
@@ -192,6 +241,27 @@ Tensor NestedTensor_nested_tensor_from_mask(const Tensor& t, const Tensor& mask)
     sizes = at::cat({sizes, d}, 1).to(kCPU);
 
     return at::_nested_from_padded(t, sizes, false);
+}
+
+bool NestedTensor_nested_tensor_from_mask_left_aligned(const Tensor& t, const Tensor& mask) {
+    TORCH_CHECK(mask.scalar_type() == at::ScalarType::Bool, "Expected mask to be of ScalarType Bool, but got ", mask.scalar_type(), " instead.");
+    TORCH_CHECK(mask.dim() == 2, "Padding mask should be 2D");
+    TORCH_CHECK(t.dim() == 3, "Input should be a 3D tensor, N * L * D");
+    auto N = t.size(0), L = t.size(1);
+    auto NN = mask.size(0), LL = mask.size(1);
+    TORCH_CHECK(N == NN && L == LL, "Mask size should match input size");
+
+    // N * L
+    Tensor sizes = mask;
+    Tensor tmp_pad = at::zeros({N, 1}, mask.options());
+    // Make sure padding is only added at the end of mask
+    Tensor nums = at::cat({sizes, tmp_pad}, 1).to(kInt).argmin(1);
+
+    // N, ([size1, size2, ... sizeN])
+    sizes = sizes.cumsum(1).select(1, L - 1);
+    nums = nums.to(sizes.options());
+
+    return sizes.equal(nums);
 }
 
 Tensor nested_tensor(
@@ -354,7 +424,7 @@ Tensor NestedTensor_to_padded_tensor_generic(
 
   if (sizes.numel() == 0 || sizes.dim() == 0) {
     TORCH_INTERNAL_ASSERT_DEBUG_ONLY(nt.get_buffer().numel() == 0);
-    return nt.get_buffer();
+    return nt.get_buffer().clone();
   }
 
   // TODO: doesn't handle empty/scalar entries because we don't need
@@ -557,6 +627,26 @@ Tensor& NestedTensor_mul__Tensor(Tensor& self, const Tensor& other) {
       });
 }
 
+Tensor select_nested(const Tensor& self, int64_t dim, int64_t index) {
+  auto self_ptr = get_nested_tensor_impl(self);
+  int64_t positive_dim = at::maybe_wrap_dim(dim, self_ptr->dim());
+  TORCH_CHECK(
+    positive_dim == 0,
+    "NestedTensor can only be selected along dimension 0 ",
+    "got dimension ", dim, " instead."
+  );
+  int64_t ntensors = self_ptr->size(0);
+  TORCH_CHECK_INDEX(
+      index >= -ntensors && index < ntensors,
+      "index ", index,
+      " is out of bounds for dimension 0 with size ", ntensors);
+  int64_t positive_index = index < 0 ? index + ntensors : index;
+  const at::Tensor & buffer = self_ptr->get_buffer();
+  std::vector<int64_t> offsets = NestedTensor_get_offsets(self_ptr);
+  std::vector<IntArrayRef> shapes = NestedTensor_get_shapes(self_ptr);
+  return buffer.slice(0, offsets[positive_index], offsets[positive_index + 1]).view(shapes[positive_index]);
+}
+
 Tensor clone_nested(
     const Tensor& self,
     c10::optional<c10::MemoryFormat> optional_memory_format) {
@@ -571,6 +661,24 @@ Tensor clone_nested(
   // efficient implementation of nested_size_tensor_.
   return wrap_buffer(
       get_buffer(self).clone(), get_nested_size_tensor(self).clone());
+}
+
+at::Tensor NestedTensor_get_nested_size_tensor(const at::Tensor& self){
+  return get_nested_size_tensor(self);
+}
+
+Tensor dropout_nested(const Tensor& input, double p, bool train) {
+  auto input_ptr = get_nested_tensor_impl(input);
+  const Tensor & input_buffer = input_ptr->get_buffer(),
+                 sizemat = input_ptr->get_nested_size_tensor();
+  Tensor output_buffer = at::dropout(input_buffer, p, train);
+  return wrap_buffer(output_buffer, sizemat.clone());
+}
+
+Tensor& dropout_nested_(Tensor& input, double p, bool train) {
+  Tensor input_buffer = get_buffer(input);
+  at::dropout_(input_buffer, p, train);
+  return input;
 }
 
 } // namespace native
