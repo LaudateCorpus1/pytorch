@@ -133,6 +133,14 @@ def compare_tensor_meta(a: TensorLikeType, b: TensorLikeType, check_strides=Fals
             )
             raise RuntimeError(msg)
 
+        if a.storage_offset() != b.storage_offset():
+            msg = (
+                "Storage offset mismatch! Storage offsets are {0} and {1}!".format(
+                    a.storage_offset(), b.storage_offset()
+                )
+            )
+            raise RuntimeError(msg)
+
 
 def check_significant_strides(
     a: TensorLikeType, b: TensorLikeType
@@ -947,6 +955,14 @@ def get_higher_dtype(
             return a
 
     raise RuntimeError("Unexpected termination!")
+
+
+def check_pin_memory(pin_memory: bool):
+    check(not pin_memory, lambda: "PrimTorch does not support pinned memory", NotImplementedError)
+
+
+def check_layout(layout: torch.layout):
+    check(layout == torch.strided, lambda: f"PrimTorch doesn't support layout={layout}", NotImplementedError)
 
 
 # TODO: maybe unify with can_cast_to?
